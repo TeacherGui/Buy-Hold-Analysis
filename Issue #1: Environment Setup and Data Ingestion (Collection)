@@ -1,1 +1,90 @@
+import os
+from datetime import datetime, timedelta
 
+import pandas as pd
+
+
+def configure_ssl_certificates() -> None:
+    """Try to force Python/yfinance to use certifi's CA bundle for SSL verification."""
+    try:
+        import certifi
+    except ImportError:
+        print("Warning: certifi is not installed. SSL certificate verification may fail for yfinance.")
+        return
+
+    cert_path = certifi.where()
+    if os.path.exists(cert_path):
+        for var in ["SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE"]:
+            os.environ.pop(var, None)
+        os.environ["PYTHONHOME"] = os.environ.get("PYTHONHOME", "")
+        os.environ["SSL_CERT_FILE"] = cert_path
+        os.environ["CURL_CA_BUNDLE"] = cert_path
+        os.environ["REQUESTS_CA_BUNDLE"] = cert_path
+        print(f"Using certifi SSL certificate bundle: {cert_path}")
+        print("SSL_CERT_FILE set to:", os.environ.get("SSL_CERT_FILE"))
+        print("CURL_CA_BUNDLE set to:", os.environ.get("CURL_CA_BUNDLE"))
+        print("REQUESTS_CA_BUNDLE set to:", os.environ.get("REQUESTS_CA_BUNDLE"))
+    else:
+        print(f"Warning: certifi certificate file not found at {cert_path}")
+
+
+# 1) Locate the CSV file in the same folder as this script.
+configure_ssl_certificates()
+import yfinance as yf
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_PATH = os.path.join(SCRIPT_DIR, "carteira.csv")
+
+# 2) Read the portfolio table into a pandas DataFrame.
+holdings = pd.read_csv(CSV_PATH)
+print("Portfolio loaded:")
+print(holdings.head())
+
+# 3) Clean the ticker symbols and prepare them for yfinance.
+#    Brazilian tickers on B3 usually need the ".SA" suffix.
+holdings["Ticker"] = holdings["Ticker"].astype(str).str.strip()
+
+def to_yahoo_ticker(symbol: str) -> str:
+    symbol = symbol.strip().upper()
+    return symbol if symbol.endswith(".SA") else f"{symbol}.SA"
+
+holdings["YahooTicker"] = holdings["Ticker"].apply(to_yahoo_ticker)
+print("Using Yahoo tickers:")
+print(holdings[["Ticker", "YahooTicker"]])
+
+# 4) Choose the historical window: between 5 and 10 years.
+years = 10 
+end_date = datetime.today()
+start_date = end_date - timedelta(days=365 * years)
+
+# 5) Download historical price history for the portfolio tickers.
+tickers = holdings["YahooTicker"].dropna().astype(str).unique().tolist()
+print("Downloading adjusted close history for:", tickers)
+
+history = yf.download(
+    tickers=tickers,
+    start=start_date.strftime("%Y-%m-%d"),
+    end=end_date.strftime("%Y-%m-%d"),
+    progress=True,
+    group_by="ticker",
+    auto_adjust=False,
+    actions=False,
+)
+
+if history.empty:
+    print("No historical data was returned. Check SSL configuration and ticker validity.")
+
+# 6) Extract the Adjusted Close price series for each ticker.
+adj_close = pd.DataFrame()
+for ticker in tickers:
+    if not history.empty and ticker in getattr(history.columns, 'levels', [])[0]:
+        adj_series = history[ticker]["Adj Close"].rename(ticker)
+        adj_close = pd.concat([adj_close, adj_series], axis=1)
+    else:
+        print(f"Warning: no history data found for {ticker}")
+
+# 7) Save the enriched historical Adjusted Close table to a CSV file.
+output_path = os.path.join(SCRIPT_DIR, "historical_adj_close.csv")
+adj_close.to_csv(output_path)
+
+print(f"Saved adjusted close history to: {output_path}")
+print(adj_close.tail())
