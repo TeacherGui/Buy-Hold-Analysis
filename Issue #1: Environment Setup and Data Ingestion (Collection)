@@ -1,67 +1,69 @@
+#Issue 1: Portfolio data input via importation and editing of a simple spreadsheet with "Ticker", "Quantity", and "Average Price" columns; use of the Pandas library to load this data into the code's memory; automated enrichment via the yfinance API for the extraction of historical time series of adjusted prices (Adj Close) over a five to ten-year window; ensuring the database already incorporates dividends, interest on equity, and corporate events for the calculation of real profitability.
 import os
 from datetime import datetime, timedelta
-
 import pandas as pd
-
+import numpy as np
+import yfinance as yf
 
 def configure_ssl_certificates() -> None:
-    """Try to force Python/yfinance to use certifi's CA bundle for SSL verification."""
+    """
+    Force the environment to use certifi's CA bundle for SSL verification.
+    This prevents common SSL certificate errors when connecting to Yahoo Finance.
+    """
     try:
         import certifi
     except ImportError:
-        print("Warning: certifi is not installed. SSL certificate verification may fail for yfinance.")
+        print("Warning: 'certifi' package not found. SSL verification may fail.")
         return
 
     cert_path = certifi.where()
     if os.path.exists(cert_path):
+        # Clean up existing environment variables to avoid conflicts
         for var in ["SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE"]:
             os.environ.pop(var, None)
-        os.environ["PYTHONHOME"] = os.environ.get("PYTHONHOME", "")
+        
+        # Set standardized paths to the updated certificate bundle
         os.environ["SSL_CERT_FILE"] = cert_path
         os.environ["CURL_CA_BUNDLE"] = cert_path
         os.environ["REQUESTS_CA_BUNDLE"] = cert_path
-        print(f"Using certifi SSL certificate bundle: {cert_path}")
-        print("SSL_CERT_FILE set to:", os.environ.get("SSL_CERT_FILE"))
-        print("CURL_CA_BUNDLE set to:", os.environ.get("CURL_CA_BUNDLE"))
-        print("REQUESTS_CA_BUNDLE set to:", os.environ.get("REQUESTS_CA_BUNDLE"))
+        print(f"SSL certificates successfully configured using certifi: {cert_path}")
     else:
-        print(f"Warning: certifi certificate file not found at {cert_path}")
+        print(f"Warning: Certificate file not found at {cert_path}")
 
-
-# 1) Locate the CSV file in the same folder as this script.
+# --- Initialize Environment ---
 configure_ssl_certificates()
-import yfinance as yf
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(SCRIPT_DIR, "carteira.csv")
 
-# 2) Read the portfolio table into a pandas DataFrame.
-holdings = pd.read_csv(CSV_PATH)
-print("Portfolio loaded:")
-print(holdings.head())
+# --- Step 1: Portfolio Loading ---
+# Reading the local portfolio file containing tickers and quantities.
+if not os.path.exists(CSV_PATH):
+    raise FileNotFoundError(f"Portfolio file 'carteira.csv' not found at {SCRIPT_DIR}")
 
-# 3) Clean the ticker symbols and prepare them for yfinance.
-#    Brazilian tickers on B3 usually need the ".SA" suffix.
+holdings = pd.read_csv(CSV_PATH)
 holdings["Ticker"] = holdings["Ticker"].astype(str).str.strip()
 
+# --- Step 2: Ticker Standardization ---
+# Brazilian assets on B3 require the '.SA' suffix for Yahoo Finance compatibility.
 def to_yahoo_ticker(symbol: str) -> str:
     symbol = symbol.strip().upper()
     return symbol if symbol.endswith(".SA") else f"{symbol}.SA"
 
 holdings["YahooTicker"] = holdings["Ticker"].apply(to_yahoo_ticker)
-print("Using Yahoo tickers:")
-print(holdings[["Ticker", "YahooTicker"]])
+tickers_list = holdings["YahooTicker"].dropna().unique().tolist()
 
-# 4) Choose the historical window: between 5 and 10 years.
+# --- Step 3: Define Time Window ---
+# Setting a 10-year historical window for long-term analysis.
 years = 10 
 end_date = datetime.today()
 start_date = end_date - timedelta(days=365 * years)
 
-# 5) Download historical price history for the portfolio tickers.
-tickers = holdings["YahooTicker"].dropna().astype(str).unique().tolist()
-print("Downloading adjusted close history for:", tickers)
-
+# --- Step 4: Bulk Data Download ---
+# Using auto_adjust=False to specifically fetch the 'Adj Close' column,
+# which accounts for dividends and splits while keeping the raw Close price available.
+print(f"Requesting data for: {tickers_list}")
 history = yf.download(
-    tickers=tickers,
+    tickers=tickers_list,
     start=start_date.strftime("%Y-%m-%d"),
     end=end_date.strftime("%Y-%m-%d"),
     progress=True,
@@ -71,20 +73,28 @@ history = yf.download(
 )
 
 if history.empty:
-    print("No historical data was returned. Check SSL configuration and ticker validity.")
+    print("Error: No data retrieved. Verify your internet connection or ticker symbols.")
 
-# 6) Extract the Adjusted Close price series for each ticker.
-adj_close = pd.DataFrame()
-for ticker in tickers:
-    if not history.empty and ticker in getattr(history.columns, 'levels', [])[0]:
-        adj_series = history[ticker]["Adj Close"].rename(ticker)
-        adj_close = pd.concat([adj_close, adj_series], axis=1)
-    else:
-        print(f"Warning: no history data found for {ticker}")
+# --- Step 5: Data Extraction & Transformation ---
+# Isolating only the Adjusted Close series for each asset into a clean DataFrame.
+adj_close_df = pd.DataFrame()
 
-# 7) Save the enriched historical Adjusted Close table to a CSV file.
+# Checking for MultiIndex structure (returned when downloading multiple tickers)
+if isinstance(history.columns, pd.MultiIndex):
+    for ticker in tickers_list:
+        if ticker in history.columns.levels[0]:
+            series = history[ticker]["Adj Close"].rename(ticker)
+            adj_close_df = pd.concat([adj_close_df, series], axis=1)
+        else:
+            print(f"Warning: No data found for ticker {ticker}")
+else:
+    # Fallback for single-ticker download
+    adj_close_df = history["Adj Close"].to_frame()
+
+# --- Step 6: Storage ---
+# Saving the processed historical prices to a CSV for the next processing stage.
 output_path = os.path.join(SCRIPT_DIR, "historical_adj_close.csv")
-adj_close.to_csv(output_path)
+adj_close_df.to_csv(output_path)
 
-print(f"Saved adjusted close history to: {output_path}")
-print(adj_close.tail())
+print(f"Success: Historical Adjusted Closes saved to {output_path}")
+print(adj_close_df.tail())
