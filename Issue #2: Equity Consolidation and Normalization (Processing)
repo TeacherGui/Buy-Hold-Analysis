@@ -1,1 +1,75 @@
+#Issue 2: Time-series alignment to synchronize assets and benchmarks, handling holidays and non-trading days; calculation of the daily equity value by multiplying the adjusted price of each asset by its respective quantity in custody; application of base-100 normalization on the total equity curve and on the benchmarks (Ibovespa, IPCA and SELIC) to allow for visual comparison of percentage growth from a common starting point; conversion of prices into daily percentage changes, or log-returns, to serve as input for statistical risk and correlation calculations.
 
+# --- 1. Data Cleaning & Portfolio Equity Calculation ---
+
+# Loading historical adjusted prices and ensuring the index is treated as datetime objects.
+df_prices = pd.read_csv("historical_adj_close.csv", index_col=0, parse_dates=True)
+
+# Synchronizing assets by forward-filling gaps (e.g., specific market holidays).
+# This propagates the last known price to ensure a continuous time-series.
+df_prices = df_prices.ffill().dropna(how='all')
+
+# Mapping each ticker to its quantity to calculate the monetary value of each position.
+qtd_map = holdings.set_index("YahooTicker")["Quantity"].to_dict()
+
+# Creating the equity DataFrame where each column represents the daily market value of the position.
+df_equity = df_prices.copy()
+for ticker in df_prices.columns:
+    if ticker in qtd_map:
+        df_equity[ticker] = df_prices[ticker] * qtd_map[ticker]
+
+# Summing all positions to derive the Total Portfolio Value (Equity Curve) over time.
+df_equity['Total_Portfolio'] = df_equity.sum(axis=1)
+
+# Normalizing the portfolio to 'Base-100' to track percentage growth from the starting date.
+portfolio_norm = (df_equity['Total_Portfolio'] / df_equity['Total_Portfolio'].iloc[0]) * 100
+
+# --- 2. Market Benchmarking (Ibovespa) ---
+
+# Fetching Ibovespa (Market Index) and normalizing it to Base-100 for a fair performance comparison.
+ibov_data = yf.download("^BVSP", start=start_date)
+ibov = (ibov_data['Close'] if 'Close' in ibov_data.columns else ibov_data.iloc[:, 0]).squeeze()
+ibov_norm = (ibov / ibov.iloc[0]) * 100
+
+# --- 3. Macro Benchmarking (SELIC & IPCA) ---
+
+def get_sgs_data(code, start_date):
+    """
+    Fetch economic time-series from the Brazilian Central Bank (SGS System).
+    Returns a pandas Series with dates as index and values in float.
+    """
+    url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{code}/dados?formato=json&dataInicial={start_date.strftime('%d/%m/%Y')}&dataFinal={datetime.today().strftime('%d/%m/%Y')}"
+    return pd.read_json(url).assign(data=lambda d: pd.to_datetime(d['data'], dayfirst=True)).set_index('data')['valor']
+
+# Processing SELIC (Daily Overnight Rate): 
+# Since it is a daily rate, we calculate the cumulative product (compound interest) 
+# to create a Base-100 growth curve representing the risk-free opportunity cost.
+selic_daily_rate = get_sgs_data(11, start_date) / 100
+selic_norm = (1 + selic_daily_rate).cumprod() * 100
+selic_norm.name = "SELIC (CDI)"
+
+# Processing IPCA (Monthly Inflation):
+# Monthly inflation rates are compounded to track the erosion of purchasing power.
+# We reindex and forward-fill to align monthly inflation data with our daily portfolio dates.
+ipca_monthly_rate = get_sgs_data(433, start_date) / 100
+ipca_norm = (1 + ipca_monthly_rate).cumprod() * 100
+ipca_norm = ipca_norm.reindex(df_equity.index, method='ffill')
+ipca_norm.name = "IPCA (Inflation)"
+
+# --- 4. Final Comparison & Risk Metrics ---
+
+# Consolidating all normalized series into a single DataFrame for visual and statistical comparison.
+df_comparison = pd.concat([
+    portfolio_norm.rename("My Portfolio"), 
+    ibov_norm.rename("Ibovespa"),
+    selic_norm,
+    ipca_norm
+], axis=1).ffill().dropna(subset=["My Portfolio"])
+
+# Calculating Daily Log-Returns for the portfolio to provide stable inputs for statistical modeling.
+log_returns = np.log(df_equity['Total_Portfolio'] / df_equity['Total_Portfolio'].shift(1))
+
+# Annualizing Volatility (Standard Deviation of log-returns) using 252 trading days.
+volatility = log_returns.std() * np.sqrt(252)
+
+print(f"Annualized Volatility: {volatility:.2%}")
