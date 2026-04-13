@@ -1,0 +1,16 @@
+#Issue 3: Time-series alignment to synchronize assets and benchmarks, handling holidays and non-trading days; calculation of the daily equity value by multiplying the adjusted price of each asset by its respective quantity in custody; application of base-100 normalization on the total equity curve and on the benchmarks (Ibovespa, IPCA and SELIC) to allow for visual comparison of percentage growth from a common starting point; conversion of prices into daily percentage changes, or log-returns, to serve as input for statistical risk and correlation calculations.
+
+# Calculating daily percentage changes (returns) for each asset, which will be used for risk and correlation analysis.
+df_returns = df_comparison.pct_change().dropna()
+
+#Calculating correlation matrix via Pearsonto understand relationships between assets and benchmarks.
+correlation_matrix = df_returns.corr()
+
+#Calculating maximum drawdown to assess the worst peak-to-trough decline in the portfolio's value.
+cumulative_peak = df_equity['Total_Portfolio'].cummax()
+drawdown = (df_equity['Total_Portfolio'] - cumulative_peak) / cumulative_peak
+max_drawdown = drawdown.min()
+
+#Calculating Recovery Time
+drawdown_end = drawdown.idxmin() # Date of maximum drawdown
+recovery_time = (drawdown[drawdown >= 0].index - drawdown_end).min() # Time to recover to non-negative drawdown
